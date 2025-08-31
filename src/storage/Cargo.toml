@@ -150,5 +150,9 @@ harness = false
 name = "bench_table_watermarks"
 harness = false
 
+[[bench]]
+name = "bench_hnsw"
+harness = false
+
 [lints]
 workspace = true
