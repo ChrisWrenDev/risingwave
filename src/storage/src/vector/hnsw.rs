@@ -544,13 +544,9 @@ async fn search_layer<O: Send>(
 
 #[cfg(test)]
 mod tests {
-use std::collections::HashSet;
-    use std::iter::repeat_with;
-    use std::time::{Duration, Instant};
+    use std::collections::HashSet;
 
     use bytes::Bytes;
-    use faiss::{ConcurrentIndex, Index, MetricType};
-    use futures::executor::block_on;
     use itertools::Itertools;
     use rand::SeedableRng;
     use rand::prelude::StdRng;
@@ -558,11 +554,11 @@ use std::collections::HashSet;
     use crate::vector::NearestBuilder;
     use crate::vector::MeasureDistanceBuilder;
     use crate::vector::distance::InnerProductDistance;
-    use crate::vector::hnsw::{HnswBuilder, HnswBuilderOptions, HnswGraph, insert_graph, nearest};
+    use crate::vector::hnsw::{HnswBuilder, HnswBuilderOptions, HnswGraph, nearest};
     use crate::vector::test_utils::{gen_info, gen_vector};
     // Access internal types from the parent module
     use super::{BoundedNearest, VectorHnswNode};
-    
+
 // Core correctness vs a brute-force baseline
 // Small-set search ≈ exact NN (robust threshold)
 #[tokio::test]
@@ -602,7 +598,7 @@ async fn hnsw_small_matches_bruteforce() {
             |_, _, info| Bytes::copy_from_slice(info),
         );
         let expected = nb.finish();
-        let expected_set: std::collections::HashSet<_> =
+        let expected_set: HashSet<_> =
             expected.iter().map(|b| b.as_ref().to_vec()).collect();
 
         // ANN with a bit higher ef_search for better recall but still fast
@@ -620,7 +616,7 @@ async fn hnsw_small_matches_bruteforce() {
         assert!(stats.distances_computed > 0, "distances_computed should be > 0");
         assert!(stats.nhops > 0, "nhops should be > 0");
 
-        let actual_set: std::collections::HashSet<_> =
+        let actual_set: HashSet<_> =
             actual.iter().map(|b| b.as_ref().to_vec()).collect();
         let inter = expected_set.intersection(&actual_set).count();
 
@@ -770,8 +766,20 @@ async fn hnsw_degree_bounds_per_level() {
 }
 
 // Graph construction invariants — back-link admissibility at level 0
-// If u→v exists at level 0 but v does not link back to u, then v's level-0
-// neighbor set must be at capacity and d(u,v) must be >= v's current worst neighbor distance.
+//
+// This test assumes the ordering used by our MeasureDistance implementation:
+// "smaller distance is better / closer". For the current InnerProductDistance,
+// this is true because it returns a *distance* (e.g., -dot or another
+// monotone transform) where lower values mean closer.
+//
+// If the metric is ever changed to return a similarity where "higher is better",
+// or if the distance is redefined so that larger numbers are better, then the
+// inequality checks in this test must be inverted accordingly.
+//
+// In particular, when v omits a backlink to u at level 0, we require that
+// u is not strictly better than v's worst admitted neighbor; i.e.:
+//   d(u, v) >= worst_neighbor_distance(v)
+// under the "lower is better" convention.
 #[tokio::test]
 async fn hnsw_backlink_admissibility_level0() {
     const VECTOR_LEN: usize = 16;
@@ -817,7 +825,8 @@ async fn hnsw_backlink_admissibility_level0() {
                 hnsw.vector_store.vec_ref(v_idx),
             );
 
-            // worst = largest (furthest) distance in v's current level-0 neighbors
+            // "Worst" here means the furthest neighbor under the current distance order.
+            // Because smaller is better, the worst is the MAX distance among v's neighbors.
             let mut worst = f32::NEG_INFINITY;
             for (_w_idx, d_vw) in g.node_neighbours(v_idx, 0) {
                 if d_vw > worst {
@@ -825,7 +834,8 @@ async fn hnsw_backlink_admissibility_level0() {
                 }
             }
 
-            // Smaller distance = better. If u wasn't admitted, it must not be better than worst.
+            // Admissibility: if v didn't admit u, then u must not be strictly better than v's worst admitted neighbor. 
+            // With "lower is better": d_uv >= worst (+ tiny eps to avoid float noise).
             let eps = 1e-6;
             assert!(
                 d_uv + eps >= worst,
@@ -835,77 +845,66 @@ async fn hnsw_backlink_admissibility_level0() {
     }
 }
 
-// Graph construction invariants — entrypoint updates when a higher-level node appears
+// Graph construction invariants — entrypoint updates when a higher-level node appears (public API, robust)
 #[tokio::test]
 async fn hnsw_entrypoint_updates_on_higher_level_insert() {
-    const VECTOR_LEN: usize = 16;
-    const M: usize = 8;
-    const MAX_LEVEL: usize = 6;
+    const D: usize = 16;
+    const M: usize = 2;          // small m => higher levels are relatively common
+    const MAX_LEVEL: usize = 10; // give room so we can see several increases without capping out
+    const INSERTS: usize = 200;  // small and fast; plenty to see ≥1 level increase with M=2
 
-    // Build a small existing graph first
-    let options = HnswBuilderOptions { m: M, ef_construction: 16, max_level: MAX_LEVEL };
     let mut hnsw = HnswBuilder::<_, _, InnerProductDistance, _>::new(
-        VECTOR_LEN,
+        D,
         StdRng::seed_from_u64(233),
-        options,
+        HnswBuilderOptions {
+            m: M,
+            ef_construction: 16,
+            max_level: MAX_LEVEL,
+        },
     );
 
-    for i in 0..100 {
-        let v = gen_vector(VECTOR_LEN);
-        let info = gen_info(i);
+    // Track the highest level we've observed so far.
+    let mut top_seen: Option<usize> = None;
+    let mut increases_observed = 0usize;
+
+    for i in 0..INSERTS {
+        let v = gen_vector(D);
+        let info = gen_info(1_000_000usize + i);
         hnsw.insert(v.to_ref(), &info).await.unwrap();
+
+        let g = hnsw.graph.as_ref().expect("graph built");
+        let new_top = (0..g.len()).map(|idx| g.node_level(idx)).max().unwrap();
+        match top_seen {
+            None => {
+                // First insertion establishes the initial top
+                top_seen = Some(new_top);
+            }
+            Some(prev_top) if new_top > prev_top => {
+                // Top level increased; the last inserted node must own that level
+                let last = g.len() - 1;
+                assert_eq!(
+                    g.node_level(last),
+                    new_top,
+                    "new top level {new_top} not owned by last inserted node {last}"
+                );
+                assert_eq!(
+                    g.entrypoint(),
+                    last,
+                    "entrypoint was not updated to the highest-level newly inserted node"
+                );
+                top_seen = Some(new_top);
+                increases_observed += 1;
+            }
+            _ => {
+                // No increase this round; nothing to assert.
+            }
+        }
     }
 
-    let g = hnsw.graph.as_ref().expect("graph built");
-    let current_ep = g.entrypoint();
-    let current_top = g.node_level(current_ep);
-
-    // Manually craft a node with a strictly higher (max) level.
-    let target_level = MAX_LEVEL;
-    assert!(target_level >= current_top, "test precondition failed: no higher level possible");
-
-    // Build a VectorHnswNode with neighbour sets up to target_level
-    let mut level_neighbours = Vec::with_capacity(target_level);
-    for lvl in 0..=target_level {
-        let cap = if lvl == 0 { 2 * M } else { M };
-        level_neighbours.push(BoundedNearest::new(cap));
-    }
-    let injected_node = VectorHnswNode { level_neighbours };
-
-    // Vector + info for the injected node
-    let new_vec = gen_vector(VECTOR_LEN);
-    let new_info = gen_info(999_999);
-
-    {
-        let g_mut = hnsw.graph.as_mut().unwrap();
-        insert_graph::<InnerProductDistance>(
-            &hnsw.vector_store,
-            g_mut,
-            injected_node,
-            new_vec.to_ref(),
-            /* ef_construction */ 16,
-        )
-        .await
-        .unwrap();
-
-        // mirror HnswBuilder::insert payload push
-        hnsw.vector_store.add(new_vec.to_ref(), &new_info);
-    }
-
-    let g_after = hnsw.graph.as_ref().unwrap();
-    let new_index = g_after.len() - 1;
-
-    assert_eq!(
-        g_after.entrypoint(),
-        new_index,
-        "entrypoint was not updated to the higher-level node"
-    );
-
-    let top = (0..g_after.len()).map(|i| g_after.node_level(i)).max().unwrap();
-    assert_eq!(
-        g_after.node_level(new_index),
-        top,
-        "inserted node is not at the highest level"
+    assert!(
+        increases_observed > 0,
+        "no top-level increases observed over {INSERTS} inserts (M={M}, MAX_LEVEL={MAX_LEVEL}); \
+         consider increasing INSERTS if this ever flakes"
     );
 }
 
@@ -953,7 +952,7 @@ async fn hnsw_ef_search_bounds_work() {
             |_, _, info| Bytes::copy_from_slice(info),
         );
         let expected = nb.finish();
-        let expected_set: std::collections::HashSet<_> =
+        let expected_set: HashSet<_> =
             expected.iter().map(|b| b.as_ref().to_vec()).collect();
 
         // ef=8
@@ -986,9 +985,9 @@ async fn hnsw_ef_search_bounds_work() {
         total_hops_32 += s32.nhops;
 
         // recall monotonicity: ef=8 should not beat ef=32
-        let a8_set: std::collections::HashSet<_> =
+        let a8_set: HashSet<_> =
             a8.iter().map(|b| b.as_ref().to_vec()).collect();
-        let a32_set: std::collections::HashSet<_> =
+        let a32_set: HashSet<_> =
             a32.iter().map(|b| b.as_ref().to_vec()).collect();
         let r8 = expected_set.intersection(&a8_set).count();
         let r32 = expected_set.intersection(&a32_set).count();
@@ -1035,7 +1034,7 @@ async fn hnsw_early_break_pruning_triggers() {
     let g = hnsw.graph.as_ref().unwrap();
 
     // Query with the entrypoint vector
-    let ep_idx = g.entrypoint;
+    let ep_idx = g.entrypoint();
     let ep_vec = hnsw.vector_store.vec_ref(ep_idx);
     let (_a_ep, s_ep) = nearest::<_, InnerProductDistance>(
         &hnsw.vector_store,
@@ -1225,11 +1224,11 @@ async fn hnsw_topn_greater_than_dataset_size() {
     assert!(ans_large.len() <= N && ans_large.len() <= TOP_N);
 
     // No duplicates
-    let uniq_small: std::collections::HashSet<_> =
+    let uniq_small: HashSet<_> =
         ans_small.iter().map(|b| b.as_ref().to_vec()).collect();
     assert_eq!(uniq_small.len(), ans_small.len(), "duplicates in small-ef results");
 
-    let uniq_large: std::collections::HashSet<_> =
+    let uniq_large: HashSet<_> =
         ans_large.iter().map(|b| b.as_ref().to_vec()).collect();
     assert_eq!(uniq_large.len(), ans_large.len(), "duplicates in large-ef results");
 
@@ -1288,7 +1287,7 @@ async fn hnsw_duplicate_vectors_tie_handling() {
     .unwrap();
 
     // Distinct entries returned; length equals number of duplicates
-    let set1: std::collections::HashSet<_> = ans1.iter().map(|b| b.as_ref().to_vec()).collect();
+    let set1: HashSet<_> = ans1.iter().map(|b| b.as_ref().to_vec()).collect();
     assert_eq!(ans1.len(), DUPS, "should return all duplicate entries");
     assert_eq!(set1.len(), DUPS, "duplicate infos collapsed unexpectedly");
 
@@ -1330,7 +1329,7 @@ async fn hnsw_pathological_params_functional() {
         |_, _, info| Bytes::copy_from_slice(info),
     );
     let expected = nb.finish();
-    let expected_set: std::collections::HashSet<_> =
+    let expected_set: HashSet<_> =
         expected.iter().map(|b| b.as_ref().to_vec()).collect();
 
     // Very small ef_search
@@ -1361,11 +1360,11 @@ async fn hnsw_pathological_params_functional() {
     assert!(s2.distances_computed > 0 && s2.nhops > 0);
 
     let r1 = {
-        let got: std::collections::HashSet<_> = a1.iter().map(|b| b.as_ref().to_vec()).collect();
+        let got: HashSet<_> = a1.iter().map(|b| b.as_ref().to_vec()).collect();
         expected_set.intersection(&got).count()
     };
     let r2 = {
-        let got: std::collections::HashSet<_> = a2.iter().map(|b| b.as_ref().to_vec()).collect();
+        let got: HashSet<_> = a2.iter().map(|b| b.as_ref().to_vec()).collect();
         expected_set.intersection(&got).count()
     };
 
