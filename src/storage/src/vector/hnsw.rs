@@ -559,6 +559,8 @@ mod tests {
     // Access internal types from the parent module
     use super::{BoundedNearest, VectorHnswNode};
 
+    pub const SEED: u64 = 233;
+
 // Core correctness vs a brute-force baseline
 // Small-set search ≈ exact NN (robust threshold)
 #[tokio::test]
@@ -577,7 +579,7 @@ async fn hnsw_small_matches_bruteforce() {
     // build HNSW (slightly larger ef_construction for stability)
     let mut hnsw = HnswBuilder::<_, _, InnerProductDistance, _>::new(
         VECTOR_LEN,
-        StdRng::seed_from_u64(233),
+        StdRng::seed_from_u64(SEED),
         HnswBuilderOptions { m: 8, ef_construction: 32, max_level: 5 },
     );
     for (v, info) in &data {
@@ -648,7 +650,7 @@ async fn hnsw_deterministic_with_fixed_seed() {
     // build #1
     let mut h1 = HnswBuilder::<_, _, InnerProductDistance, _>::new(
         VECTOR_LEN,
-        StdRng::seed_from_u64(233),
+        StdRng::seed_from_u64(SEED),
         HnswBuilderOptions {
             m: 8,
             ef_construction: 16,
@@ -662,7 +664,7 @@ async fn hnsw_deterministic_with_fixed_seed() {
     // build #2 with the same seed and data
     let mut h2 = HnswBuilder::<_, _, InnerProductDistance, _>::new(
         VECTOR_LEN,
-        StdRng::seed_from_u64(233),
+        StdRng::seed_from_u64(SEED),
         HnswBuilderOptions {
             m: 8,
             ef_construction: 16,
@@ -715,7 +717,7 @@ async fn hnsw_entrypoint_is_highest_level() {
 
     let mut hnsw = HnswBuilder::<_, _, InnerProductDistance, _>::new(
         VECTOR_LEN,
-        StdRng::seed_from_u64(233),
+        StdRng::seed_from_u64(SEED),
         HnswBuilderOptions { m: 8, ef_construction: 16, max_level: 6 },
     );
 
@@ -739,7 +741,7 @@ async fn hnsw_degree_bounds_per_level() {
 
     let mut hnsw = HnswBuilder::<_, _, InnerProductDistance, _>::new(
         VECTOR_LEN,
-        StdRng::seed_from_u64(233),
+        StdRng::seed_from_u64(SEED),
         HnswBuilderOptions { m: M, ef_construction: 16, max_level: 6 },
     );
 
@@ -788,7 +790,7 @@ async fn hnsw_backlink_admissibility_level0() {
 
     let mut hnsw = HnswBuilder::<_, _, InnerProductDistance, _>::new(
         VECTOR_LEN,
-        StdRng::seed_from_u64(233),
+        StdRng::seed_from_u64(SEED),
         HnswBuilderOptions { m: M, ef_construction: 16, max_level: 6 },
     );
 
@@ -855,7 +857,7 @@ async fn hnsw_entrypoint_updates_on_higher_level_insert() {
 
     let mut hnsw = HnswBuilder::<_, _, InnerProductDistance, _>::new(
         D,
-        StdRng::seed_from_u64(233),
+        StdRng::seed_from_u64(SEED),
         HnswBuilderOptions {
             m: M,
             ef_construction: 16,
@@ -924,7 +926,7 @@ async fn hnsw_ef_search_bounds_work() {
     // build HNSW
     let mut hnsw = HnswBuilder::<_, _, InnerProductDistance, _>::new(
         VECTOR_LEN,
-        StdRng::seed_from_u64(233),
+        StdRng::seed_from_u64(SEED),
         HnswBuilderOptions { m: 8, ef_construction: 16, max_level: 6 },
     );
     for (v, info) in &input {
@@ -1021,7 +1023,7 @@ async fn hnsw_early_break_pruning_triggers() {
 
     let mut hnsw = HnswBuilder::<_, _, InnerProductDistance, _>::new(
         D,
-        StdRng::seed_from_u64(233),
+        StdRng::seed_from_u64(SEED),
         HnswBuilderOptions { m: 8, ef_construction: 16, max_level: 6 },
     );
 
@@ -1084,7 +1086,7 @@ async fn hnsw_visited_set_prevents_revisits() {
     // Dense-ish level-0 with small N and m=8
     let mut hnsw = HnswBuilder::<_, _, InnerProductDistance, _>::new(
         VECTOR_LEN,
-        StdRng::seed_from_u64(233),
+        StdRng::seed_from_u64(SEED),
         HnswBuilderOptions { m: 8, ef_construction: 16, max_level: 4 },
     );
     for i in 0..N {
@@ -1146,7 +1148,7 @@ async fn hnsw_single_item_behaviour() {
     // Start with an empty builder (graph created on first insert)
     let mut hnsw = HnswBuilder::<_, _, InnerProductDistance, _>::new(
         D,
-        StdRng::seed_from_u64(233),
+        StdRng::seed_from_u64(SEED),
         HnswBuilderOptions { m: 8, ef_construction: 16, max_level: 4 },
     );
 
@@ -1183,7 +1185,7 @@ async fn hnsw_topn_greater_than_dataset_size() {
     // Build a small index of size N
     let mut hnsw = HnswBuilder::<_, _, InnerProductDistance, _>::new(
         D,
-        StdRng::seed_from_u64(233),
+        StdRng::seed_from_u64(SEED),
         HnswBuilderOptions { m: 8, ef_construction: 16, max_level: 5 },
     );
     let mut data = Vec::with_capacity(N);
@@ -1256,7 +1258,7 @@ async fn hnsw_duplicate_vectors_tie_handling() {
     // Build with duplicates
     let mut hnsw = HnswBuilder::<_, _, InnerProductDistance, _>::new(
         D,
-        StdRng::seed_from_u64(233),
+        StdRng::seed_from_u64(SEED),
         HnswBuilderOptions { m: 8, ef_construction: 16, max_level: 4 },
     );
     for info in &infos {
@@ -1307,7 +1309,7 @@ async fn hnsw_pathological_params_functional() {
 
     let mut hnsw = HnswBuilder::<_, _, InnerProductDistance, _>::new(
         D,
-        StdRng::seed_from_u64(233),
+        StdRng::seed_from_u64(SEED),
         HnswBuilderOptions { m: 1, ef_construction: 1, max_level: 4 },
     );
 
