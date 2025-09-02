@@ -13,6 +13,7 @@ repository = { workspace = true }
 test = ["risingwave_hummock_sdk/test"]
 failpoints = ["fail/failpoints"]
 hm-trace = []
+hnsw-deep-bench = []
 
 [dependencies]
 ahash = "0.8"
@@ -148,6 +149,10 @@ harness = false
 
 [[bench]]
 name = "bench_table_watermarks"
+harness = false
+
+[[bench]]
+name = "bench_hnsw"
 harness = false
 
 [lints]

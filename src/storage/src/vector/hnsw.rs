@@ -71,7 +71,7 @@ impl VectorHnswNode {
     }
 }
 
-struct VectorStoreImpl {
+pub struct VectorStoreImpl {
     dimension: usize,
     vector_payload: Vec<VectorItem>,
     info_payload: Vec<u8>,
@@ -225,6 +225,16 @@ pub struct HnswBuilder<V: VectorStore, G: HnswGraph, M: MeasureDistanceBuilder, 
 pub struct HnswStats {
     distances_computed: usize,
     nhops: usize,
+}
+
+impl HnswStats {
+    pub fn distances_computed(&self) -> usize {
+        self.distances_computed
+    }
+
+    pub fn nhops(&self) -> usize {
+        self.nhops
+    }
 }
 
 struct VecSet {
@@ -551,6 +561,13 @@ async fn search_layer<O: Send>(
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct GraphShapeSummary {
+    pub level_histogram: Vec<usize>,
+    pub total_edges: usize,
+    pub avg_outdegree: f64,
+}
+
 impl<V, G, M, R> HnswBuilder<V, G, M, R>
 where
     V: VectorStore,
@@ -570,6 +587,32 @@ where
             .as_ref()
             .expect("HNSW graph is empty; insert at least one vector before searching");
         nearest::<O, M>(&self.vector_store, g, q, on_nearest, ef_search, top_n).await
+    }
+
+    /// Summarize the current graph topology without exposing internal fields.
+    /// `max_levels` caps the histogram size.
+    pub fn graph_shape(&self, max_levels: usize) -> Option<GraphShapeSummary> {
+        let g = self.graph.as_ref()?;
+        let mut hist = vec![0usize; max_levels.max(1)];
+        let mut edges = 0usize;
+
+        for i in 0..g.len() {
+            let lvl = g.node_level(i).min(hist.len() - 1);
+            hist[lvl] += 1;
+            for l in 0..g.node_level(i) {
+                edges += g.node_neighbours(i, l).count();
+            }
+        }
+        let avg = if g.len() > 0 {
+            edges as f64 / g.len() as f64
+        } else {
+            0.0
+        };
+        Some(GraphShapeSummary {
+            level_histogram: hist,
+            total_edges: edges,
+            avg_outdegree: avg,
+        })
     }
 }
 
