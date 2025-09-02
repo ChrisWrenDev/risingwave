@@ -575,9 +575,11 @@ where
 
 #[cfg(test)]
 mod tests {
+    use faiss::{Index, MetricType};
     use rand::SeedableRng;
     use rand::rngs::StdRng;
     use risingwave_common::types::VectorVal;
+    use risingwave_common::vector::distance::InnerProductDistance;
 
     use super::*;
     use crate::vector::test_utils::{gen_info, gen_vector};
@@ -622,7 +624,7 @@ mod tests {
         let mut a = [0u8; std::mem::size_of::<usize>()];
         let n = a.len();
         a.copy_from_slice(&info[..n]);
-        usize::from_le_bytes(a)
+        usize::from_le_bytes(info[..std::mem::size_of::<usize>()].try_into().unwrap())
     }
 
     fn opts(m: usize, efc: usize, max_level: usize) -> HnswBuilderOptions {
@@ -1000,6 +1002,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(not(madsim))]
     #[tokio::test]
     #[should_panic(expected = "HNSW graph is empty")]
     async fn hnsw_search_panics_on_empty_graph() {
@@ -1014,5 +1017,58 @@ mod tests {
                 1,
             )
             .await;
+    }
+
+    #[cfg(not(madsim))]
+    #[tokio::test]
+    async fn hnsw_faiss_interop_smoke() {
+        const DIM: usize = 16;
+        const N: usize = 200;
+        const M: usize = 8;
+
+        // Build our HNSW
+        let opts = HnswBuilderOptions {
+            m: M,
+            ef_construction: 32,
+            max_level: 4,
+        };
+        let mut ours: HnswBuilder<VectorStoreImpl, HnswGraphBuilder, InnerProductDistance, _> =
+            HnswBuilder::new(DIM, StdRng::seed_from_u64(123), opts);
+
+        let mut vecs = Vec::new();
+        for i in 0..N {
+            let v = gen_vector(DIM);
+            ours.insert(VectorRef::from_slice_unchecked(v.as_slice()), &gen_info(i))
+                .await
+                .unwrap();
+            vecs.push(v);
+        }
+
+        // Build FAISS HNSW on the same data
+        let mut faiss_hnsw =
+            faiss::index::hnsw::HnswFlatIndex::new(DIM as u32, M as u32, MetricType::InnerProduct)
+                .unwrap();
+        for v in &vecs {
+            faiss_hnsw.add(v.as_raw_slice()).unwrap();
+        }
+
+        // Quick parity: query a few random vectors and compare top-1 id equality
+        let q = &vecs[7];
+        let (hits, _stats) = ours
+            .search::<usize>(
+                VectorRef::from_slice_unchecked(q.as_slice()),
+                |_v, _d, info| decode_info_usize(info),
+                16,
+                1,
+            )
+            .await
+            .unwrap();
+
+        let fa = faiss_hnsw.assign(q.as_raw_slice(), 1).unwrap();
+        let fa_top1 = fa.labels[0].get().unwrap_or_default() as usize;
+
+        // We expect both to return the same self-id for exact match queries
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0], fa_top1);
     }
 }
