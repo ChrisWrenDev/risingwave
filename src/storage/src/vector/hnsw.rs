@@ -230,6 +230,7 @@ pub struct HnswStats {
 }
 
 impl HnswStats {
+    /// Number of **unique** vectors whose distance was computed during the query.
     pub fn distances_computed(&self) -> usize {
         self.distances_computed
     }
@@ -392,6 +393,7 @@ pub(crate) async fn insert_graph<M: MeasureDistanceBuilder>(
                     entrypoints,
                     level_idx, // level index
                     1,
+                    None,
                     &mut stats,
                     &mut visited,
                 )
@@ -414,6 +416,7 @@ pub(crate) async fn insert_graph<M: MeasureDistanceBuilder>(
                     entrypoints,
                     level_idx, // level index
                     ef_construction,
+                    None,
                     &mut stats,
                     &mut visited,
                 )
@@ -468,8 +471,10 @@ pub async fn nearest<O: Send, M: MeasureDistanceBuilder>(
 
         let entry_top = graph.node_num_levels(entrypoint_index).saturating_sub(1);
         let mut visited = VecSet::new(graph.len());
-        visited.set(entrypoint_index);
+        let mut measured = VecSet::new(graph.len());
+        measured.set(entrypoint_index);
         for level_idx in (1..=entry_top).rev() {
+            visited.reset();
             entrypoints = search_layer(
                 vector_store,
                 graph,
@@ -478,11 +483,13 @@ pub async fn nearest<O: Send, M: MeasureDistanceBuilder>(
                 entrypoints,
                 level_idx, // level index
                 1,
+                Some(&mut measured),
                 &mut stats,
                 &mut visited,
             )
             .await?;
         }
+        visited.reset();
         entrypoints = search_layer(
             vector_store,
             graph,
@@ -491,6 +498,7 @@ pub async fn nearest<O: Send, M: MeasureDistanceBuilder>(
             entrypoints,
             0,
             ef_search,
+            Some(&mut measured),
             &mut stats,
             &mut visited,
         )
@@ -510,6 +518,7 @@ async fn search_layer<O: Send>(
     entrypoints: BoundedNearest<(usize, O)>,
     level_index: usize,
     ef: usize,
+    mut measured: Option<&mut VecSet>,
     stats: &mut HnswStats,
     visited: &mut VecSet,
 ) -> HummockResult<BoundedNearest<(usize, O)>> {
@@ -546,8 +555,25 @@ async fn search_layer<O: Send>(
                 visited.set(neighbour_index);
                 let vector = vector_store.get_vector(neighbour_index).await?;
                 let info = vector.info();
+                // Count a distance computation only once per query, even if we revisit the same
+                // node on another HNSW layer.
+                let first_time = if let Some(m) = &mut measured {
+                    if m.is_set(neighbour_index) {
+                        false
+                    } else {
+                        m.set(neighbour_index);
+                        true
+                    }
+                } else {
+                    // Contruction path
+                    true
+                };
+
                 let distance = measure.measure(vector.vec_ref());
-                stats.distances_computed += 1;
+                if first_time {
+                    stats.distances_computed += 1;
+                }
+
                 let mut added = false;
                 let added = &mut added;
                 nearest.insert(distance, || {
